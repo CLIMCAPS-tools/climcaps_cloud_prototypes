@@ -36,6 +36,7 @@ def get_granule_list(year, doy, short_name):
         short_name = short_name, cloud_hosted=True,
         temporal=(window_start.strftime('%Y-%m-%d'), window_stop.strftime('%Y-%m-%d')),
     )
+
     # the way the time range is applied (I think it is 'less than or equal to'),
     # we get the last granule from the previous day, and the first granule from
     # the next day. Since the temporal range is only Y-M-D we have to manually
@@ -45,12 +46,15 @@ def get_granule_list(year, doy, short_name):
     # example filename:
     # SNDR.J1.CRIMSS.20191009T2354.m06.g240.L2_CLIMCAPS_RET.std.v02_28.G.200215102526.nc
 
-    expected_ymd = window_start.strftime('%Y%m%d')
-    for idx in (0, -1):
-        filename = granule_list[idx].data_links()[idx].split('/')[-1]
-        ymd = filename.split('.')[3][:8]
-        if ymd != expected_ymd:
-            _ = granule_list.pop(idx)
+    # granule list could be zero (if there is a data gap) - in which case granule_list
+    # could be an empty list.
+    if len(granule_list) > 0:
+        expected_ymd = window_start.strftime('%Y%m%d')
+        for idx in (0, -1):
+            filename = granule_list[idx].data_links()[idx].split('/')[-1]
+            ymd = filename.split('.')[3][:8]
+            if ymd != expected_ymd:
+                _ = granule_list.pop(idx)
 
     return granule_list
 
@@ -184,13 +188,30 @@ def write_cdat(cdat, dims, attrs, fname):
                 fill_value = attrs[v]['_FillValue']
             else:
                 fill_value = None
+            # string needs to be special-cased: the numpy array we get from
+            # the netCDF4 library has dtype object, so we can't use the
+            # dtype as the data type for the created NC variable.
+            if cdat[v].dtype == object:
+                # check the first element to make sure it is a python str.
+                # if not, this is a case we do not handle, so throw exception.
+                # the syntax here is supposed to be a simple way to check the
+                # first element without knowing the ndim or shape.
+                if type(cdat[v].flat[0]) == str:
+                    output_dtype = str
+                else:
+                    raise ValueError(
+                        'concatenated array has type object, and does not '+
+                        'contain python strings. Cannot write batch to netCDF4')
+            else:
+                output_dtype = cdat[v].dtype
+
             ncv = nc.createVariable(
-                v, cdat[v].dtype,
+                v, output_dtype,
                 dimensions = tuple(dims[v]['names']),
                 compression = 'zlib',
                 complevel = 1,
                 fill_value = fill_value)
-            ncv[:] = cdat[v].data
+            ncv[:] = cdat[v]
             # TBD: do we need to special case for setncattr_string?
             for aname, avalue in attrs[v].items():
                 if aname == '_FillValue':
@@ -231,6 +252,10 @@ def run_subagg(year, doy, platform, var_list, output_file, local_download=False,
 
     short_name = get_climcaps_short_name(platform)
     granule_list = get_granule_list(year, doy, short_name)
+
+    if len(granule_list) == 0:
+        print('Year {:d}, DOY {:d} returned no granules'.format(year, doy))
+        return
 
     dat_list = []
 
